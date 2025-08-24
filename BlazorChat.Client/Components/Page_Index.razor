@@ -1,0 +1,61 @@
+@page "/"
+@using Microsoft.AspNetCore.SignalR.Client
+
+<h3>Chat</h3>
+
+<input @bind="username" @bind:event="oninput" placeholder="Username"/>
+<input @bind="message" @bind:event="oninput" placeholder="Type a message..."/>
+<button @onclick="SendMessage">Send</button>
+
+@foreach (var m in messages)
+{
+    <p>
+        <span
+            title="@($"{m.TimeSent.ToShortTimeString()} {(m.TimeSent - m.TimeReceived).GetValueOrDefault().Milliseconds}ms")">@m.TimeSent.TimeOfDay</span>
+        -
+        <span style="width: 30ch">@m.Sender</span>
+        :
+        <span>@m.MessageText</span>
+    </p>
+}
+
+
+@code {
+    HubConnection? hub;
+    string? message;
+    List<Message> messages = new();
+
+    string username = Guid.CreateVersion7().ToString();
+
+    protected override async Task OnInitializedAsync()
+    {
+        hub = new HubConnectionBuilder()
+            .WithUrl(Navigation.ToAbsoluteUri("/chatHub"))
+            .WithAutomaticReconnect()
+            .Build();
+
+        hub.On<Message>("ReceiveMessage", (msg) =>
+        {
+            msg.TimeReceived = DateTime.Now;
+            messages.Add(msg);
+            InvokeAsync(StateHasChanged);
+        });
+
+        await hub.StartAsync();
+    }
+
+    async Task SendMessage()
+    {
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            Message msg = new()
+            {
+                MessageText = message,
+                Sender = username,
+            };
+            await hub!.InvokeAsync("SendMessage", msg);
+            message = string.Empty;
+        }
+    }
+
+}
