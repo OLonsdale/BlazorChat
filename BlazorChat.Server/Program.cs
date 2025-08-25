@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using BlazorChat.Server.Hubs;
 
 namespace BlazorChat.Server;
 
@@ -44,13 +45,5 @@ internal static class Program
         app.MapHub<ChatHub>("/chatHub");
         app.Run();
         
-    }
-}
-
-public class ChatHub : Hub
-{
-    public async Task SendMessage(Message message)
-    {
-        await Clients.All.SendAsync("ReceiveMessage", message);
     }
 }

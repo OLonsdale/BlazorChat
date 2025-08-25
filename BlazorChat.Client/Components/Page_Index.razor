@@ -1,34 +1,101 @@
 @page "/"
 @using Microsoft.AspNetCore.SignalR.Client
+@inject IJSRuntime JS
 
-<h3>Chat</h3>
+<MudContainer MaxWidth="MaxWidth.Medium" Class="pa-4">
+    <MudStack Spacing="2">
+        <MudStack Row>
+            <MudText Typo="Typo.h4" Class="mr-auto">Chat</MudText>
+            <MudIconButton Icon="@Icons.Material.Filled.Settings" OnClick="ToggleSettings" />
+        </MudStack>
 
-<input @bind="username" @bind:event="oninput" placeholder="Username"/>
-<input @bind="message" @bind:event="oninput" placeholder="Type a message..."/>
-<button @onclick="SendMessage">Send</button>
+        @if (_showSettings)
+        {
+            <MudPaper Class="pa-3 mb-2" Elevation="2">
+                <MudStack Row Spacing="2" AlignItems="AlignItems.Center">
+                    <MudTextField @bind-Value="username" Label="Username" Variant="Variant.Outlined" Style="width: 20rem;" Immediate OnBlur="OnUsernameBlur" />
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Style="@GetMyColorStyle()">My Color</MudChip>
+                    <MudStack Row Spacing="1">
+                        @foreach (var hex in Statics._palette)
+                        {
+                            <MudIconButton Size="Size.Small" Style="@GetSwatchStyle(hex)" OnClick="() => SelectColor(hex)" />
+                        }
+                    </MudStack>
+                    <MudSwitch T="bool" @bind-Value="_disableLocalStorage" Color="Color.Secondary" Label="Disable local storage" @bind-Value:after="SaveLocalSettings" />
+                    <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="NewSession">New Session</MudButton>
+                </MudStack>
+            </MudPaper>
+        }
+        
+        <MudPaper Class="pa-2 mb-2" Elevation="1">
+            <MudStack Row Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Spacing="1">
+                <MudText Typo="Typo.subtitle1">Active Users (@activeUsers.Count):</MudText>
+                @foreach (var u in activeUsers.OrderBy(u => u.Name))
+                {
+                    <MudChip T="string" Size="Size.Small" Style="@GetUserChipStyle(u)">@u.Name</MudChip>
+                }
+            </MudStack>
+        </MudPaper>
 
-@foreach (var m in messages)
-{
-    <p>
-        <span
-            title="@($"{m.TimeSent.ToShortTimeString()} {(m.TimeSent - m.TimeReceived).GetValueOrDefault().Milliseconds}ms")">@m.TimeSent.TimeOfDay</span>
-        -
-        <span style="width: 30ch">@m.Sender</span>
-        :
-        <span>@m.MessageText</span>
-    </p>
-}
+        <MudPaper Class="pa-2 mb-2" Elevation="1">
+            <MudStack Row Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Spacing="1">
+                <MudText Typo="Typo.subtitle1">Inactive Users (@inactiveUsers.Count):</MudText>
+                @foreach (var u in inactiveUsers.OrderBy(u => u.Name))
+                {
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Style="@GetUserChipStyle(u)">@u.Name</MudChip>
+                }
+            </MudStack>
+        </MudPaper>
+        
+        <MudPaper Class="pa-2" Elevation="1" Style="min-height: 50vh; display:flex; flex-direction:column;">
+            <MudStack Row Spacing="2" Class="mt-2">
+                <MudTextField @bind-Value="message" Variant="Variant.Outlined" Placeholder="Type a message..." FullWidth Immediate OnKeyDown="@(async e => { if (e.Key == "Enter") await SendMessage(); })" />
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SendMessage">Send</MudButton>
+            </MudStack>
+            
+            @if (messages.Count == 0)
+            {
+                <MudText Class="pa-4" Color="Color.Secondary">No messages yet. Say hi!</MudText>
+            }
+
+            <MudStack Spacing="1">
+                @foreach (var m in messages.OrderBy(x => x.TimeSent))
+                {
+                    <MudChat Variant="Variant.Filled" ChatPosition="@(IsMine(m) ? ChatBubblePosition.End : ChatBubblePosition.Start)">
+                        <MudAvatar Style="@GetBubbleStyle(m)">@(GetSenderName(m).FirstOrDefault())</MudAvatar>
+                        <MudChatBubble Color="Color.Default" Style="@GetBubbleStyle(m)">
+                            @m.MessageText
+                            <MudChatFooter Text="@m.TimeSent.ToShortTimeString()"/>
+                        </MudChatBubble>
+                    </MudChat>
+                }
+            </MudStack>
+
+        </MudPaper>
+    </MudStack>
+</MudContainer>
+
 
 
 @code {
-    HubConnection? hub;
-    string? message;
-    List<Message> messages = new();
+   
+    private bool _showSettings = false;
+    private Color _myColor = Color.Primary;
 
-    string username = Guid.CreateVersion7().ToString();
+    private HubConnection? hub;
+    private string? message;
+    private List<Message> messages = new();
+    private List<User> users = new();
+    private List<User> activeUsers = new();
+    private List<User> inactiveUsers = new();
+    private Guid myUserId = Guid.Empty;
+    private string username = Guid.CreateVersion7().ToString();
+    private bool _disableLocalStorage = false;
 
     protected override async Task OnInitializedAsync()
     {
+        await LoadLocalSettings();
+
         hub = new HubConnectionBuilder()
             .WithUrl(Navigation.ToAbsoluteUri("/chatHub"))
             .WithAutomaticReconnect()
@@ -41,21 +108,166 @@
             InvokeAsync(StateHasChanged);
         });
 
+        hub.On<List<User>>("ActiveUsersUpdated", (list) =>
+        {
+            users = list ?? new();
+            activeUsers = users.Where(u => u.Online).ToList();
+            inactiveUsers = users.Where(u => !u.Online).ToList();
+            InvokeAsync(StateHasChanged);
+        });
+
         await hub.StartAsync();
+        await hub.InvokeAsync("Join", myUserId, username);
+        if (!string.IsNullOrWhiteSpace(_myColorHex))
+        {
+            await hub.InvokeAsync("SetColor", _myColorHex);
+        }
+        var current = await hub.InvokeAsync<List<User>>("GetActiveUsers");
+        users = current ?? new();
+        activeUsers = users.Where(u => u.Online).ToList();
+        inactiveUsers = users.Where(u => !u.Online).ToList();
     }
 
-    async Task SendMessage()
+    private async Task SendMessage()
     {
         if (!string.IsNullOrWhiteSpace(message))
         {
-            Message msg = new()
+            var msg = new Message
             {
                 MessageText = message,
-                Sender = username,
+                SenderUserId = myUserId,
+                TimeSent = DateTime.Now
             };
             await hub!.InvokeAsync("SendMessage", msg);
             message = string.Empty;
+            await SaveLocalSettings();
         }
     }
 
+    private async Task ToggleSettings()
+    {
+        // If hiding settings, persist current values
+        if (_showSettings)
+        {
+            await SaveLocalSettings();
+        }
+        _showSettings = !_showSettings;
+    }
+
+    private bool IsMine(Message m) => m.SenderUserId == myUserId;
+
+    private string GetBubbleStyle(Message m)
+    {
+        var u = users.FirstOrDefault(x => x.Id == m.SenderUserId);
+        var hex = u?.ColorHex ?? "#444";
+        return $"background-color:{hex}; color:#fff;";
+    }
+
+    private string GetSenderName(Message m)
+    {
+        return users.FirstOrDefault(x => x.Id == m.SenderUserId)?.Name ?? "unknown";
+    }
+
+    private string GetUserChipStyle(User u)
+    {
+        return $"background-color:{u.ColorHex}; color:#fff; margin-right:4px;";
+    }
+
+    private string? _myColorHex;
+
+    private string GetMyColorHex()
+    {
+        var me = users.FirstOrDefault(x => x.Id == myUserId);
+        return me?.ColorHex ?? _myColorHex ?? Statics.ColorForId(myUserId);
+    }
+
+    private string GetMyColorStyle() => $"background-color:{GetMyColorHex()}; color:#fff;";
+
+    private string GetSwatchStyle(string hex) => $"width:24px;height:24px;border-radius:50%;background-color:{hex};border:1px solid rgba(255,255,255,0.6)";
+
+    private async Task SelectColor(string hex)
+    {
+        _myColorHex = hex;
+        await SaveLocalSettings();
+        if (hub is not null && hub.State == HubConnectionState.Connected)
+        {
+            await hub.InvokeAsync("SetColor", hex);
+        }
+    }
+
+    private async Task LoadLocalSettings()
+    {
+        try
+        {
+            // read disable flag first
+            var disable = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.disableStorage");
+            _disableLocalStorage = disable == "1";
+
+            if (!_disableLocalStorage)
+            {
+                var name = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.username");
+                if (!string.IsNullOrWhiteSpace(name)) username = name!;
+                var idStr = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.userId");
+                if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var parsed))
+                    myUserId = parsed;
+                if (myUserId == Guid.Empty)
+                {
+                    myUserId = Guid.CreateVersion7();
+                    await JS.InvokeVoidAsync("localStorage.setItem", "chat.userId", myUserId.ToString());
+                }
+                var hex = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.colorHex");
+                if (!string.IsNullOrWhiteSpace(hex)) _myColorHex = hex;
+            }
+            else
+            {
+                // storage disabled: generate fresh id for this tab session
+                myUserId = Guid.CreateVersion7();
+            }
+        }
+        catch { /* ignore, localStorage might be blocked */ }
+    }
+
+    private async Task SaveLocalSettings()
+    {
+        try
+        {
+            // always persist the disable flag when possible
+            await JS.InvokeVoidAsync("localStorage.setItem", "chat.disableStorage", _disableLocalStorage ? "1" : "0");
+            if (_disableLocalStorage)
+                return;
+            await JS.InvokeVoidAsync("localStorage.setItem", "chat.username", username);
+            await JS.InvokeVoidAsync("localStorage.setItem", "chat.userId", myUserId.ToString());
+            if (!string.IsNullOrWhiteSpace(_myColorHex))
+                await JS.InvokeVoidAsync("localStorage.setItem", "chat.colorHex", _myColorHex);
+        }
+        catch { /* ignore */ }
+    }
+    
+
+    private async Task NewSession()
+    {
+        myUserId = Guid.CreateVersion7();
+        await SaveLocalSettings();
+        if (hub is not null && hub.State == HubConnectionState.Connected)
+        {
+            await hub.InvokeAsync("Join", myUserId, username);
+            if (!string.IsNullOrWhiteSpace(_myColorHex))
+            {
+                await hub.InvokeAsync("SetColor", _myColorHex);
+            }
+        }
+    }
+
+    private async Task OnUsernameBlur()
+    {
+        await SaveLocalSettings();
+        if (hub is not null && hub.State == HubConnectionState.Connected)
+        {
+            await hub.InvokeAsync("Join", myUserId, username);
+            if (!string.IsNullOrWhiteSpace(_myColorHex))
+            {
+                await hub.InvokeAsync("SetColor", _myColorHex);
+            }
+        }
+    }
 }

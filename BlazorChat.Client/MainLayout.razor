@@ -1,6 +1,20 @@
 @inherits LayoutComponentBase
 
-<PageTitle>BlazorChat</PageTitle>
+<MudThemeProvider @bind-IsDarkMode="dark" />
+<MudPopoverProvider/>
+<MudDialogProvider/>
+<MudSnackbarProvider/>
 
-@Body
+<MudLayout>
+    <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="pa-4">
+        <CascadingValue Value="(Action)(() => dark = !dark)">
+            @Body
+        </CascadingValue>
+    </MudContainer>
+</MudLayout>
 
+@code {
+    
+    bool dark = true;
+    
+}
