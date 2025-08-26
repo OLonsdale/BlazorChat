@@ -1,27 +1,44 @@
 @page "/"
+@using System.Text
 @using Microsoft.AspNetCore.SignalR.Client
-@inject IJSRuntime JS
+@using BlazorChat.Shared
+@inject Blazored.LocalStorage.ILocalStorageService LocalStorage
 
 <MudContainer MaxWidth="MaxWidth.Medium" Class="pa-4">
     <MudStack Spacing="2">
         <MudStack Row>
             <MudText Typo="Typo.h4" Class="mr-auto">Chat</MudText>
-            <MudIconButton Icon="@Icons.Material.Filled.Settings" OnClick="ToggleSettings" />
+            @switch (hub?.State)
+            {
+                case HubConnectionState.Connected:
+                    <MudChip T="string" Color="Color.Success" Size="Size.Small" OnClick="Disconnect">Connected</MudChip>
+                    break;
+                case HubConnectionState.Disconnected:
+                    <MudChip T="string" Color="Color.Error" Size="Size.Small" OnClick="Connect">Disconnected</MudChip>
+                    break;
+                case HubConnectionState.Connecting or HubConnectionState.Reconnecting:
+                    <MudProgressCircular Indeterminate Color="Color.Warning" />
+                    break;
+            }
+            <MudIconButton Icon="@Icons.Material.Filled.Brightness6" OnClick="@ToggleDark" />
+            
+            <MudIconButton Icon="@Icons.Material.Filled.Settings" OnClick="@ToggleSettings" />
         </MudStack>
 
-        @if (_showSettings)
+        @if (showSettings)
         {
             <MudPaper Class="pa-3 mb-2" Elevation="2">
                 <MudStack Row Spacing="2" AlignItems="AlignItems.Center">
-                    <MudTextField @bind-Value="username" Label="Username" Variant="Variant.Outlined" Style="width: 20rem;" Immediate OnBlur="OnUsernameBlur" />
-                    <MudChip T="string" Size="Size.Small" Variant="Variant.Filled" Style="@GetMyColorStyle()">My Color</MudChip>
-                    <MudStack Row Spacing="1">
-                        @foreach (var hex in Statics._palette)
+                    <MudTextField @bind-Value="user.Name" @bind-Value:after="UpdateUser" Label="Username" Variant="Variant.Outlined" Style="width: 20rem;" />
+                    
+                    <MudSelect @bind-Value="user.ColorHex" @bind-Value:after="UpdateUser" Label="Color" Variant="Variant.Outlined" Style="@($"width: 10rem; background-color: {user.ColorHex}")">
+                        @foreach (var hex in Statics.Palette)
                         {
-                            <MudIconButton Size="Size.Small" Style="@GetSwatchStyle(hex)" OnClick="() => SelectColor(hex)" />
+                            <MudSelectItem Style="@($"background-color: {hex}")" Value="@hex">@string.Empty</MudSelectItem>
                         }
-                    </MudStack>
-                    <MudSwitch T="bool" @bind-Value="_disableLocalStorage" Color="Color.Secondary" Label="Disable local storage" @bind-Value:after="SaveLocalSettings" />
+                    </MudSelect>
+
+                    <MudSwitch T="bool" @bind-Value="disableLocalStorage" Color="Color.Secondary" Label="Disable local storage" @bind-Value:after="SaveLocalSettings" />
                     <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="NewSession">New Session</MudButton>
                 </MudStack>
             </MudPaper>
@@ -29,8 +46,8 @@
         
         <MudPaper Class="pa-2 mb-2" Elevation="1">
             <MudStack Row Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Spacing="1">
-                <MudText Typo="Typo.subtitle1">Active Users (@activeUsers.Count):</MudText>
-                @foreach (var u in activeUsers.OrderBy(u => u.Name))
+                <MudText Typo="Typo.subtitle1">Online Users (@OnlineUsers.Count):</MudText>
+                @foreach (var u in OnlineUsers.OrderBy(u => u.Name))
                 {
                     <MudChip T="string" Size="Size.Small" Style="@GetUserChipStyle(u)">@u.Name</MudChip>
                 }
@@ -39,8 +56,8 @@
 
         <MudPaper Class="pa-2 mb-2" Elevation="1">
             <MudStack Row Wrap="Wrap.Wrap" AlignItems="AlignItems.Center" Spacing="1">
-                <MudText Typo="Typo.subtitle1">Inactive Users (@inactiveUsers.Count):</MudText>
-                @foreach (var u in inactiveUsers.OrderBy(u => u.Name))
+                <MudText Typo="Typo.subtitle1" @onclick="ClearOffline">Offline Users (@OfflineUsers.Count):</MudText>
+                @foreach (var u in OfflineUsers.OrderBy(u => u.Name))
                 {
                     <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Style="@GetUserChipStyle(u)">@u.Name</MudChip>
                 }
@@ -49,8 +66,9 @@
         
         <MudPaper Class="pa-2" Elevation="1" Style="min-height: 50vh; display:flex; flex-direction:column;">
             <MudStack Row Spacing="2" Class="mt-2">
-                <MudTextField @bind-Value="message" Variant="Variant.Outlined" Placeholder="Type a message..." FullWidth Immediate OnKeyDown="@(async e => { if (e.Key == "Enter") await SendMessage(); })" />
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SendMessage">Send</MudButton>
+                <MudTextField @bind-Value="message" Variant="Variant.Outlined" Placeholder="Type a message..." FullWidth
+                              Immediate OnKeyDown="@(async e => { if (e.Key == "Enter") await SendMessage(); })" />
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@SendMessage">Send</MudButton>
             </MudStack>
             
             @if (messages.Count == 0)
@@ -61,7 +79,7 @@
             <MudStack Spacing="1">
                 @foreach (var m in messages.OrderBy(x => x.TimeSent))
                 {
-                    <MudChat Variant="Variant.Filled" ChatPosition="@(IsMine(m) ? ChatBubblePosition.End : ChatBubblePosition.Start)">
+                    <MudChat Variant="Variant.Filled" ChatPosition="@(m.SenderUserId == user.Id ? ChatBubblePosition.End : ChatBubblePosition.Start)">
                         <MudAvatar Style="@GetBubbleStyle(m)">@(GetSenderName(m).FirstOrDefault())</MudAvatar>
                         <MudChatBubble Color="Color.Default" Style="@GetBubbleStyle(m)">
                             @m.MessageText
@@ -79,53 +97,85 @@
 
 @code {
    
-    private bool _showSettings = false;
-    private Color _myColor = Color.Primary;
+    private bool showSettings = false;
 
     private HubConnection? hub;
     private string? message;
     private List<Message> messages = new();
     private List<User> users = new();
-    private List<User> activeUsers = new();
-    private List<User> inactiveUsers = new();
-    private Guid myUserId = Guid.Empty;
-    private string username = Guid.CreateVersion7().ToString();
-    private bool _disableLocalStorage = false;
+    List<User> OnlineUsers => users.Where(x => x.Online).ToList();
+    List<User> OfflineUsers => users.Where(x => !x.Online).ToList();
 
+[CascadingParameter] public Action ToggleDark { get; set; } = null!;
+
+
+    User user = new();
+    
+    private bool disableLocalStorage = false;
+
+    static class LocalStorageKeys
+    {
+        public const string User = "chat.user";
+        public const string LocalStorageDisabled = "chat.disableStorage";
+    }
+
+    async Task Disconnect()
+    {
+        if (hub is null) return;
+        await hub.StopAsync();
+    }
+
+    async Task Connect()
+    {
+        if (hub is null) return;
+        await hub.StartAsync();
+    }
+    
     protected override async Task OnInitializedAsync()
     {
         await LoadLocalSettings();
 
         hub = new HubConnectionBuilder()
-            .WithUrl(Navigation.ToAbsoluteUri("/chatHub"))
+            .WithUrl(Navigation.ToAbsoluteUri(HubRoutes.ChatHub))
             .WithAutomaticReconnect()
             .Build();
 
-        hub.On<Message>("ReceiveMessage", (msg) =>
+        hub.On<Message>(nameof(IChatClient.ReceiveMessage), (msg) =>
         {
             msg.TimeReceived = DateTime.Now;
             messages.Add(msg);
             InvokeAsync(StateHasChanged);
         });
 
-        hub.On<List<User>>("ActiveUsersUpdated", (list) =>
+        hub.On<List<User>>(nameof(IChatClient.UsersUpdated), (list) =>
         {
             users = list ?? new();
-            activeUsers = users.Where(u => u.Online).ToList();
-            inactiveUsers = users.Where(u => !u.Online).ToList();
             InvokeAsync(StateHasChanged);
         });
 
-        await hub.StartAsync();
-        await hub.InvokeAsync("Join", myUserId, username);
-        if (!string.IsNullOrWhiteSpace(_myColorHex))
+        hub.Closed += exception =>
         {
-            await hub.InvokeAsync("SetColor", _myColorHex);
-        }
-        var current = await hub.InvokeAsync<List<User>>("GetActiveUsers");
+            StateHasChanged();
+            return Task.CompletedTask;
+        };
+
+        hub.Reconnected += s =>
+        {
+            StateHasChanged();
+            return Task.CompletedTask;
+        };
+
+        hub.Reconnecting += exception =>
+        {
+            StateHasChanged();
+            return Task.CompletedTask;
+        };
+
+        await hub.StartAsync();
+        await hub.InvokeAsync(nameof(IChatHub.Join), user);
+
+        var current = await hub.InvokeAsync<List<User>>(nameof(IChatHub.GetUsers));
         users = current ?? new();
-        activeUsers = users.Where(u => u.Online).ToList();
-        inactiveUsers = users.Where(u => !u.Online).ToList();
     }
 
     private async Task SendMessage()
@@ -135,10 +185,10 @@
             var msg = new Message
             {
                 MessageText = message,
-                SenderUserId = myUserId,
+                SenderUserId = user.Id,
                 TimeSent = DateTime.Now
             };
-            await hub!.InvokeAsync("SendMessage", msg);
+            await hub!.InvokeAsync(nameof(IChatHub.SendMessage), msg);
             message = string.Empty;
             await SaveLocalSettings();
         }
@@ -146,15 +196,12 @@
 
     private async Task ToggleSettings()
     {
-        // If hiding settings, persist current values
-        if (_showSettings)
+        if (showSettings)
         {
             await SaveLocalSettings();
         }
-        _showSettings = !_showSettings;
+        showSettings = !showSettings;
     }
-
-    private bool IsMine(Message m) => m.SenderUserId == myUserId;
 
     private string GetBubbleStyle(Message m)
     {
@@ -173,55 +220,15 @@
         return $"background-color:{u.ColorHex}; color:#fff; margin-right:4px;";
     }
 
-    private string? _myColorHex;
-
-    private string GetMyColorHex()
-    {
-        var me = users.FirstOrDefault(x => x.Id == myUserId);
-        return me?.ColorHex ?? _myColorHex ?? Statics.ColorForId(myUserId);
-    }
-
-    private string GetMyColorStyle() => $"background-color:{GetMyColorHex()}; color:#fff;";
-
-    private string GetSwatchStyle(string hex) => $"width:24px;height:24px;border-radius:50%;background-color:{hex};border:1px solid rgba(255,255,255,0.6)";
-
-    private async Task SelectColor(string hex)
-    {
-        _myColorHex = hex;
-        await SaveLocalSettings();
-        if (hub is not null && hub.State == HubConnectionState.Connected)
-        {
-            await hub.InvokeAsync("SetColor", hex);
-        }
-    }
-
     private async Task LoadLocalSettings()
     {
         try
         {
-            // read disable flag first
-            var disable = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.disableStorage");
-            _disableLocalStorage = disable == "1";
+            disableLocalStorage = await LocalStorage.GetItemAsync<bool>(LocalStorageKeys.LocalStorageDisabled);
 
-            if (!_disableLocalStorage)
+            if (!disableLocalStorage)
             {
-                var name = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.username");
-                if (!string.IsNullOrWhiteSpace(name)) username = name!;
-                var idStr = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.userId");
-                if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var parsed))
-                    myUserId = parsed;
-                if (myUserId == Guid.Empty)
-                {
-                    myUserId = Guid.CreateVersion7();
-                    await JS.InvokeVoidAsync("localStorage.setItem", "chat.userId", myUserId.ToString());
-                }
-                var hex = await JS.InvokeAsync<string?>("localStorage.getItem", "chat.colorHex");
-                if (!string.IsNullOrWhiteSpace(hex)) _myColorHex = hex;
-            }
-            else
-            {
-                // storage disabled: generate fresh id for this tab session
-                myUserId = Guid.CreateVersion7();
+                user = await LocalStorage.GetItemAsync<User>(LocalStorageKeys.User) ?? new();
             }
         }
         catch { /* ignore, localStorage might be blocked */ }
@@ -231,43 +238,39 @@
     {
         try
         {
-            // always persist the disable flag when possible
-            await JS.InvokeVoidAsync("localStorage.setItem", "chat.disableStorage", _disableLocalStorage ? "1" : "0");
-            if (_disableLocalStorage)
+            await LocalStorage.SetItemAsync(LocalStorageKeys.LocalStorageDisabled, disableLocalStorage);
+            if (disableLocalStorage)
                 return;
-            await JS.InvokeVoidAsync("localStorage.setItem", "chat.username", username);
-            await JS.InvokeVoidAsync("localStorage.setItem", "chat.userId", myUserId.ToString());
-            if (!string.IsNullOrWhiteSpace(_myColorHex))
-                await JS.InvokeVoidAsync("localStorage.setItem", "chat.colorHex", _myColorHex);
+            await LocalStorage.SetItemAsync(LocalStorageKeys.User, user);
         }
         catch { /* ignore */ }
     }
     
-
     private async Task NewSession()
     {
-        myUserId = Guid.CreateVersion7();
-        await SaveLocalSettings();
-        if (hub is not null && hub.State == HubConnectionState.Connected)
-        {
-            await hub.InvokeAsync("Join", myUserId, username);
-            if (!string.IsNullOrWhiteSpace(_myColorHex))
-            {
-                await hub.InvokeAsync("SetColor", _myColorHex);
-            }
-        }
-    }
+        user = new User();
+        if (hub is null) return;
+        await hub.StopAsync();
+        await hub.StartAsync();
+        await hub.InvokeAsync(nameof(IChatHub.Join), user);
 
-    private async Task OnUsernameBlur()
+    }
+    
+    private async Task UpdateUser()
     {
         await SaveLocalSettings();
         if (hub is not null && hub.State == HubConnectionState.Connected)
         {
-            await hub.InvokeAsync("Join", myUserId, username);
-            if (!string.IsNullOrWhiteSpace(_myColorHex))
-            {
-                await hub.InvokeAsync("SetColor", _myColorHex);
-            }
+            await hub.InvokeAsync(nameof(IChatHub.UpdateUser), user);
         }
     }
+
+    private async Task ClearOffline()
+    {
+        if (hub is not null && hub.State == HubConnectionState.Connected)
+        {
+            await hub.InvokeAsync(nameof(IChatHub.ClearOfflineUsers));
+        }
+    }
+
 }

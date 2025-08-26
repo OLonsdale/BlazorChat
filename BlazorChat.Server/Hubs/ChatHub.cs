@@ -1,96 +1,86 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using BlazorChat.Shared;
 using Microsoft.AspNetCore.SignalR;
 
 namespace BlazorChat.Server.Hubs;
 
-public class ChatHub : Hub
+public class ChatHub : Hub<IChatClient>
 {
-    // In-memory stores (no persistence)
-    private static readonly ConcurrentDictionary<Guid, User> _usersById = new();
-    private static readonly ConcurrentDictionary<string, Guid> _connectionToUserId = new();
+    
+    /*
+     *      Any public method here can be called by name, by the client.
+     */
+    
+    
+    private static readonly List<User> Users = [];
 
+    [HubMethodName(nameof(IChatHub.SendMessage))]
     public async Task SendMessage(Message message)
     {
-        await Clients.All.SendAsync("ReceiveMessage", message);
+        await Clients.All.ReceiveMessage(message);
+    }
+    
+    [HubMethodName(nameof(IChatHub.ClearOfflineUsers))]
+    public async Task ClearOfflineUsers()
+    {
+        Users.RemoveAll(x => !x.Online);
+        await BroadcastUsers();
+    }
+    
+    private async Task BroadcastUsers()
+    {
+        var list = await GetUsers();
+        await Clients.All.UsersUpdated(list);
     }
 
-    public async Task Join(Guid userId, string username)
+    [HubMethodName(nameof(IChatHub.Join))]
+    public async Task Join(User user)
     {
-        if (string.IsNullOrWhiteSpace(username))
-            username = "anon";
+        var existingUser = Users.FirstOrDefault(x => x.Id == user.Id) ?? user;
+        
+        Users.Remove(existingUser);
+        existingUser.Name = user.Name;
+        existingUser.ColorHex = user.ColorHex;
+        existingUser.Online = true;
+        existingUser.ActiveConnections.Add(Context.ConnectionId);
+        Users.Add(existingUser);
 
-        // create or update user by id
-        var user = _usersById.GetOrAdd(userId, id => new User
+        await BroadcastUsers();
+    }
+
+    [HubMethodName(nameof(IChatHub.UpdateUser))]
+    public async Task UpdateUser(User user)
+    {
+        var existingUser = Users.FirstOrDefault(x => x.Id == user.Id);
+        if (existingUser != null)
         {
-            Id = id,
-            Name = username,
-            ColorHex = Statics.ColorForId(id),
-            Online = true
-        });
-
-        // update name and online status if already exists
-        user.Name = username;
-        user.Online = true;
-        _usersById[userId] = user;
-
-        _connectionToUserId[Context.ConnectionId] = userId;
-        await BroadcastActiveUsers();
-    }
-
-    public Task<List<User>> GetActiveUsers()
-    {
-        var list = new List<User>(_usersById.Values);
-        return Task.FromResult(list);
-    }
-
-    public async Task SetColor(string colorHex)
-    {
-        if (!_connectionToUserId.TryGetValue(Context.ConnectionId, out var userId))
-            return;
-
-        if (string.IsNullOrWhiteSpace(colorHex))
-            return;
-
-        // Only allow from unified palette for now
-        if (Array.IndexOf(Statics._palette, colorHex) < 0)
-            return;
-
-        if (_usersById.TryGetValue(userId, out var user))
-        {
-            user.ColorHex = colorHex;
-            _usersById[userId] = user;
-            await BroadcastActiveUsers();
+            existingUser.Name = user.Name;
+            existingUser.ColorHex = user.ColorHex;
         }
+        await BroadcastUsers();
     }
-
+    
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        if (_connectionToUserId.TryRemove(Context.ConnectionId, out var userId))
+        var user = Users.FirstOrDefault(x => x.ActiveConnections.Contains(Context.ConnectionId));
+        if (user != null)
         {
-            // Determine if any other active connections still exist for this userId
-            var stillConnected = false;
-            foreach (var kv in _connectionToUserId)
-            {
-                if (kv.Value == userId) { stillConnected = true; break; }
-            }
-
-            if (!stillConnected && _usersById.TryGetValue(userId, out var user))
-            {
-                user.Online = false;
-                _usersById[userId] = user;
-            }
-            await BroadcastActiveUsers();
+            user.ActiveConnections.Remove(Context.ConnectionId);
+            user.Online = user.ActiveConnections.Any();
+            await BroadcastUsers();
         }
         await base.OnDisconnectedAsync(exception);
     }
 
-    private Task BroadcastActiveUsers()
+    [HubMethodName(nameof(IChatHub.GetUsers))]
+    public async Task<List<User>> GetUsers()
     {
-        var list = new List<User>(_usersById.Values);
-        return Clients.All.SendAsync("ActiveUsersUpdated", list);
+        return Users.ToList();
     }
+
+
 }

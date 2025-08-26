@@ -1,4 +1,5 @@
 @inherits LayoutComponentBase
+@inject Blazored.LocalStorage.ILocalStorageService LocalStorage
 
 <MudThemeProvider @bind-IsDarkMode="dark" />
 <MudPopoverProvider/>
@@ -7,14 +8,40 @@
 
 <MudLayout>
     <MudContainer MaxWidth="MaxWidth.ExtraExtraLarge" Class="pa-4">
-        <CascadingValue Value="(Action)(() => dark = !dark)">
+        <CascadingValue Value="(Action)ToggleTheme">
             @Body
         </CascadingValue>
     </MudContainer>
 </MudLayout>
 
 @code {
-    
     bool dark = true;
-    
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                var mode = await LocalStorage.GetItemAsync<string>("theme");
+                var isDark = string.Equals(mode, "dark", StringComparison.OrdinalIgnoreCase);
+                if (dark != isDark)
+                {
+                    dark = isDark;
+                    StateHasChanged();
+                }
+            }
+            catch
+            {
+                // JS not available (prerender or error): safely ignore
+            }
+        }
+    }
+
+    void ToggleTheme()
+    {
+        dark = !dark;
+        var mode = dark ? "dark" : "light";
+        _ = LocalStorage.SetItemAsync("theme", mode);
+    }
 }

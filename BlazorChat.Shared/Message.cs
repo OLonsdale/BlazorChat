@@ -1,5 +1,3 @@
-using System;
-
 namespace BlazorChat.Shared;
 
 public class Message

@@ -42,7 +42,7 @@ internal static class Program
         app.MapRazorPages();
         app.MapControllers();
         app.MapFallbackToFile("index.html");
-        app.MapHub<ChatHub>("/chatHub");
+        app.MapHub<ChatHub>(HubRoutes.ChatHub);
         app.Run();
         
     }
